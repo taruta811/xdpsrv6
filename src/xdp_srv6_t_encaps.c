@@ -7,13 +7,13 @@
 #include <uapi/linux/seg6.h>
 
 #define MAX_TRANSIT_ENTRIES 256
-#define MAX_SEGMENTS 20
+#define MAX_SEGMENTS 5
 
 #define NEXTHDR_ROUTING 43
 
 struct transit_behavior {
-    int mode;
-    int segment_length;
+    __u32 mode;
+    __u32 segment_length;
     struct in6_addr saddr;
     struct in6_addr segments[MAX_SEGMENTS];
 };
@@ -26,26 +26,28 @@ static inline int handle_ipv4(struct xdp_md *xdp) {
     void *data_end = (void *)(long)xdp->data_end;
     void *data = (void *)(long)xdp->data;
     struct transit_behavior *tb;
-    struct ethhdr *old_eth, *new_eth;
-    struct iphdr *ihdr = data + sizeof(struct ethhdr);
+    struct ethhdr *old_eth = data, *new_eth;
+    struct iphdr *ihdr = (void *)(data + sizeof(struct ethhdr));
     struct ipv6hdr *hdr;
     struct ipv6_sr_hdr *srh;
-    __u32 srh_len, tot_len, i, inner_len;
+    __u8 srh_len;
+    __u16 inner_len;
+    __u32 i;
 
-    if ((long)ihdr + sizeof(struct iphdr) > (long)data_end) {
+    if ((void*)(data + sizeof(struct ethhdr) + sizeof(struct iphdr)) > data_end) {
         return XDP_DROP;
     }
-    inner_len = sizeof(struct ethhdr) + ihdr->tot_len;
+    inner_len = ntohs(ihdr->tot_len);
 
     tb = transit_table_v4.lookup(&ihdr->daddr);
     if (!tb) {
-        return XDP_DROP;
+        return XDP_PASS;
     }
 
-    srh_len = sizeof(struct ipv6_sr_hdr) + sizeof(struct in6_addr) * tb->segment_length;
-    if (srh_len < sizeof(struct ipv6_sr_hdr) || srh_len > sizeof(struct ipv6_sr_hdr) + sizeof(struct in6_addr) * MAX_SEGMENTS) {
+    if (tb->segment_length > MAX_SEGMENTS) {
         return XDP_DROP;
     }
+    srh_len = sizeof(struct ipv6_sr_hdr) + sizeof(struct in6_addr) * tb->segment_length;
     if(bpf_xdp_adjust_head(xdp, 0 - (int)(sizeof(struct ipv6hdr) + srh_len))) {
         return XDP_DROP;
     }
@@ -53,45 +55,64 @@ static inline int handle_ipv4(struct xdp_md *xdp) {
     data = (void *)(long)xdp->data;
     data_end = (void *)(long)xdp->data_end;
 
-    // new_eth = data;
+    // eth header
+    new_eth= (void *)data;
+    old_eth = (void *)(data + sizeof(struct ipv6hdr) + srh_len);
+    if ((void *)((long)old_eth + sizeof(struct ethhdr)) > data_end) {
+        return XDP_DROP;
+    }
+    if((void *)((long)new_eth + sizeof(struct ethhdr)) > data_end) {
+        return XDP_DROP;
+    }
+    memcpy(&new_eth->h_source, &old_eth->h_dest, sizeof(unsigned char) * ETH_ALEN);
+    memcpy(&new_eth->h_dest, &old_eth->h_source, sizeof(unsigned char) * ETH_ALEN);
+    new_eth->h_proto = htons(ETH_P_IPV6);
+
+    // outer IPv6 header
     hdr = (void *)data + sizeof(struct ethhdr);
-    // old_eth = (void *)data + sizeof(struct ipv6hdr) + srh_len;
-    // ihdr = (void *)old_eth + sizeof(struct ethhdr);
-
-    // if ((void *)(hdr + sizeof(struct ipv6hdr) + srh_len + inner_len) > data_end) {
-    if ((void *)(hdr + 1) > data_end) {
+    if ((void *)(data + sizeof(struct ethhdr) + sizeof(struct ipv6hdr)) > data_end) {
         return XDP_DROP;
     }
-    // if ((long)hdr + sizeof(struct ipv6hdr) > (long)data_end) {
-    //     return XDP_DROP;
-    // }
-    hdr->payload_len = srh_len + inner_len;
+    hdr->version = 6;
+    hdr->priority = 0;
     hdr->nexthdr = NEXTHDR_ROUTING;
+    hdr->hop_limit = 64;
+    hdr->payload_len = htons(srh_len + inner_len);
     memcpy(&hdr->saddr, &tb->saddr, sizeof(struct in6_addr));
-    memcpy(&hdr->daddr, &tb->segments[0], sizeof(struct in6_addr));
-
-    srh = (void *)data + sizeof(struct ethhdr) + sizeof(struct ipv6hdr);
-    if ((void *)(srh + 4 * MAX_SEGMENTS) > data_end) {
+    if (tb->segment_length == 0 || tb->segment_length > MAX_SEGMENTS) {
         return XDP_DROP;
     }
+    memcpy(&hdr->daddr, &tb->segments[tb->segment_length - 1], sizeof(struct in6_addr));
 
+    // SR header
+    srh = (void *)hdr + sizeof(struct ipv6hdr);
+    if ((void *)(data + sizeof(struct ethhdr) + sizeof(struct ipv6hdr) + sizeof(struct ipv6_sr_hdr)) > data_end) {
+        return XDP_DROP;
+    }
     srh->nexthdr = IPPROTO_IPIP;
     srh->hdrlen = srh_len;
     srh->type = 4;
-    srh->segments_left = tb->segment_length - 1;
-    srh->first_segment = tb->segment_length - 1;
+    srh->segments_left = tb->segment_length;
+    srh->first_segment = tb->segment_length;
     srh->flags = 0;
 
-#pragma clang loop unroll(full)
+    #pragma clang loop unroll(full)
     for (i = 0; i < MAX_SEGMENTS; i++) {
-        if (i > tb->segment_length) {
+        if (i >= tb->segment_length) {
             break;
         }
-        bpf_trace_printk("test");
+        if ((void *)(data + sizeof(struct ethhdr) + sizeof(struct ipv6hdr) + sizeof(struct ipv6_sr_hdr) + sizeof(struct in6_addr) * (i + 1)) > data_end) {
+            return XDP_DROP;
+        }
         memcpy(&srh->segments[i], &tb->segments[i], sizeof(struct in6_addr));
     }
 
     return XDP_TX;
+}
+
+static inline int handle_ipv6(struct xdp_md *ctx) {
+    // TODO
+    return XDP_PASS;
 }
 
 
@@ -109,6 +130,8 @@ int xdp_srv6_t_encaps(struct xdp_md *xdp) {
 
     if (h_proto == htons(ETH_P_IP)) {
         return handle_ipv4(xdp);
+    } else if (h_proto == htons(ETH_P_IPV6)) {
+        return handle_ipv6(xdp);
     }
 
     return XDP_PASS;
