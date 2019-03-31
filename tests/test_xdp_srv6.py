@@ -94,7 +94,7 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
         packet_in = Ether() / ARP()
         self._run_test(packet_in, None, BPF.XDP_PASS)
 
-    def test_drop_ipv4_unknown_address(self):
+    def test_pass_ipv4_unknown_address(self):
         packet_in = Ether() / IP(src="192.168.0.1", dst="192.168.0.2") / TCP()
         self._run_test(packet_in, None, BPF.XDP_PASS)
 
