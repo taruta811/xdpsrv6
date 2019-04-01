@@ -90,10 +90,10 @@ static inline int handle_ipv4(struct xdp_md *xdp) {
         return XDP_DROP;
     }
     srh->nexthdr = IPPROTO_IPIP;
-    srh->hdrlen = srh_len;
+    srh->hdrlen = (srh_len / 8 - 1);
     srh->type = 4;
-    srh->segments_left = tb->segment_length;
-    srh->first_segment = tb->segment_length;
+    srh->segments_left = tb->segment_length - 1;
+    srh->first_segment = tb->segment_length - 1;
     srh->flags = 0;
 
     #pragma clang loop unroll(full)

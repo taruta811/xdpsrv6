@@ -106,7 +106,7 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
         packet_out = \
             Ether(src="bb:bb:bb:bb:bb:bb", dst="aa:aa:aa:aa:aa:aa") / \
             IPv6(src="fc00::1", dst="fc00::2") / \
-            IPv6ExtHdrSegmentRouting(len=(8 + 16 * 1), segleft=1, lastentry=1, addresses=["fc00::2"]) / \
+            IPv6ExtHdrSegmentRouting(len=(16 * 1) / 8, segleft=0, lastentry=0, addresses=["fc00::2"]) / \
             IP(src="192.168.1.1", dst="192.168.1.2") / \
             TCP()
         self._run_test(packet_in, packet_out, BPF.XDP_TX)
@@ -119,7 +119,7 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
         packet_out = \
             Ether(src="bb:bb:bb:bb:bb:bb", dst="aa:aa:aa:aa:aa:aa") / \
             IPv6(src="fc00::1", dst="fc00::3") / \
-            IPv6ExtHdrSegmentRouting(len=(8 + 16 * 2), segleft=2, lastentry=2, addresses=["fc00::2", "fc00::3"]) / \
+            IPv6ExtHdrSegmentRouting(len=(16 * 2) / 8, segleft=1, lastentry=1, addresses=["fc00::2", "fc00::3"]) / \
             IP(src="192.168.1.1", dst="192.168.1.3") / \
             TCP()
         self._run_test(packet_in, packet_out, BPF.XDP_TX)
