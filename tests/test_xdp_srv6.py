@@ -9,19 +9,25 @@ import socket
 MAX_SEGMENTS = 5
 
 
-class TransitBehaviorV4(ctypes.Structure):
+def ipv6_to_n(ipv6):
+    addr = (ctypes.c_uint32 * 4)()
+    addr_int = int(ipv6)
+    for i in range(4):
+        addr[-i - 1] = socket.htonl((addr_int >> (32 * i) & 0xffffffff))
+    return addr
+
+
+class TransitBehavior(ctypes.Structure):
     _fields_ = [
-        ("mode", ctypes.c_uint32),
         ("segment_length", ctypes.c_uint32),
         ("saddr", ctypes.c_uint32 * 4),
-        ("segments", ctypes.c_uint32 * (4 * MAX_SEGMENTS)),
+        ("segments", (ctypes.c_uint32 * 4) * MAX_SEGMENTS),
     ]
 
     @staticmethod
-    def create(mode, saddr, segments):
-        tb = TransitBehaviorV4()
+    def create(saddr, segments):
+        tb = TransitBehavior()
 
-        tb.mode = mode
         tb.segment_length = len(segments)
         tb.set_saddr(ipaddress.IPv6Address(saddr))
         tb.set_segments(
@@ -30,18 +36,11 @@ class TransitBehaviorV4(ctypes.Structure):
         return tb
 
     def set_saddr(self, ipv6addr):
-        addr_int = int(ipv6addr)
-        for i in range(4):
-            self.saddr[-i - 1] = socket.htonl(
-                (addr_int >> (32 * i) & 0xffffffff))
+        self.saddr = ipv6_to_n(ipv6addr)
 
     def set_segments(self, segments):
         for i, segment in enumerate(segments):
-            addr_int = int(segment)
-            for j in range(4):
-                index = (3 - j) + 4 * i
-                self.segments[index] = socket.htonl(
-                    (addr_int >> (32 * j) & 0xffffffff))
+            self.segments[i] = ipv6_to_n(segment)
 
 
 class SRv6_T_Encaps_TestCase(unittest.TestCase):
@@ -78,17 +77,34 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
         self.bpf = BPF(src_file=b"../src/xdp_srv6_t_encaps.c")
         self.func = self.bpf.load_func("xdp_srv6_t_encaps", BPF.XDP)
 
-        self.tb_table = self.bpf.get_table("transit_table_v4")
+        self.tb_table_v4 = self.bpf.get_table("transit_table_v4")
+        self.tb_table_v6 = self.bpf.get_table("transit_table_v6")
 
-        dst_ip_key = self.tb_table.Key(
+        # IPv4 encap rule (one segment)
+        dst_ip_key = self.tb_table_v4.Key(
             socket.htonl(int(ipaddress.IPv4Address(u"192.168.1.2"))))
-        self.tb_table[dst_ip_key] = TransitBehaviorV4.create(
-            mode=1, saddr=u"fc00::1", segments=[u"fc00::2"])
+        self.tb_table_v4[dst_ip_key] = TransitBehavior.create(
+            saddr=u"fc00::1", segments=[u"fc00::2"])
 
-        dst_ip_key = self.tb_table.Key(
+        # IPv4 encap rule (two segments)
+        dst_ip_key = self.tb_table_v4.Key(
             socket.htonl(int(ipaddress.IPv4Address(u"192.168.1.3"))))
-        self.tb_table[dst_ip_key] = TransitBehaviorV4.create(
-            mode=1, saddr=u"fc00::1", segments=[u"fc00::2", u"fc00::3"])
+        self.tb_table_v4[dst_ip_key] = TransitBehavior.create(
+            saddr=u"fc00::1", segments=[u"fc00::2", u"fc00::3"])
+
+        # IPv6 encap rule (one segment)
+        dst_ip_key = self.tb_table_v6.Key()
+        dst_ip_key.in6_u.u6_addr32 = ipv6_to_n(
+            ipaddress.IPv6Address(u"2001:db8::2"))
+        self.tb_table_v6[dst_ip_key] = TransitBehavior.create(
+            saddr=u"fc00::1", segments=[u"fc00::2"])
+
+        # IPv6 encap rule (two segments)
+        dst_ip_key = self.tb_table_v6.Key()
+        dst_ip_key.in6_u.u6_addr32 = ipv6_to_n(
+            ipaddress.IPv6Address(u"2001:db8::3"))
+        self.tb_table_v6[dst_ip_key] = TransitBehavior.create(
+            saddr=u"fc00::1", segments=[u"fc00::2", u"fc00::3"])
 
     def test_pass_arp(self):
         packet_in = Ether() / ARP()
@@ -121,6 +137,32 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
             IPv6(src="fc00::1", dst="fc00::3") / \
             IPv6ExtHdrSegmentRouting(len=(16 * 2) / 8, segleft=1, lastentry=1, addresses=["fc00::2", "fc00::3"]) / \
             IP(src="192.168.1.1", dst="192.168.1.3") / \
+            TCP()
+        self._run_test(packet_in, packet_out, BPF.XDP_TX)
+
+    def test_encap_ipv6_one_segment(self):
+        packet_in = \
+            Ether(src="aa:aa:aa:aa:aa:aa", dst="bb:bb:bb:bb:bb:bb") / \
+            IPv6(src="2001:db8::1", dst="2001:db8::2") / \
+            TCP()
+        packet_out = \
+            Ether(src="bb:bb:bb:bb:bb:bb", dst="aa:aa:aa:aa:aa:aa") / \
+            IPv6(src="fc00::1", dst="fc00::2") / \
+            IPv6ExtHdrSegmentRouting(len=(16 * 1) / 8, segleft=0, lastentry=0, addresses=["fc00::2"]) / \
+            IPv6(src="2001:db8::1", dst="2001:db8::2") / \
+            TCP()
+        self._run_test(packet_in, packet_out, BPF.XDP_TX)
+
+    def test_encap_ipv6_two_segment(self):
+        packet_in = \
+            Ether(src="aa:aa:aa:aa:aa:aa", dst="bb:bb:bb:bb:bb:bb") / \
+            IPv6(src="2001:db8::1", dst="2001:db8::3") / \
+            TCP()
+        packet_out = \
+            Ether(src="bb:bb:bb:bb:bb:bb", dst="aa:aa:aa:aa:aa:aa") / \
+            IPv6(src="fc00::1", dst="fc00::3") / \
+            IPv6ExtHdrSegmentRouting(len=(16 * 2) / 8, segleft=1, lastentry=1, addresses=["fc00::2", "fc00::3"]) / \
+            IPv6(src="2001:db8::1", dst="2001:db8::3") / \
             TCP()
         self._run_test(packet_in, packet_out, BPF.XDP_TX)
 

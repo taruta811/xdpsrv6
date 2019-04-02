@@ -5,14 +5,12 @@
 #include <uapi/linux/ip.h>
 #include <uapi/linux/ipv6.h>
 #include <uapi/linux/seg6.h>
+#include <net/ipv6.h>
 
 #define MAX_TRANSIT_ENTRIES 256
 #define MAX_SEGMENTS 5
 
-#define NEXTHDR_ROUTING 43
-
 struct transit_behavior {
-    __u32 mode;
     __u32 segment_length;
     struct in6_addr saddr;
     struct in6_addr segments[MAX_SEGMENTS];
@@ -21,28 +19,14 @@ struct transit_behavior {
 BPF_TABLE("hash", __u32, struct transit_behavior, transit_table_v4, MAX_TRANSIT_ENTRIES);
 BPF_TABLE("hash", struct in6_addr, struct transit_behavior, transit_table_v6, MAX_TRANSIT_ENTRIES);
 
-
-static inline int handle_ipv4(struct xdp_md *xdp) {
+static inline int srv6_encap(struct xdp_md *xdp, struct transit_behavior *tb, __u16 inner_len, __u8 protocol) {
     void *data_end = (void *)(long)xdp->data_end;
     void *data = (void *)(long)xdp->data;
-    struct transit_behavior *tb;
-    struct ethhdr *old_eth = data, *new_eth;
-    struct iphdr *ihdr = (void *)(data + sizeof(struct ethhdr));
+    struct ethhdr *old_eth, *new_eth;
     struct ipv6hdr *hdr;
     struct ipv6_sr_hdr *srh;
     __u8 srh_len;
-    __u16 inner_len;
     __u32 i;
-
-    if ((void*)(data + sizeof(struct ethhdr) + sizeof(struct iphdr)) > data_end) {
-        return XDP_DROP;
-    }
-    inner_len = ntohs(ihdr->tot_len);
-
-    tb = transit_table_v4.lookup(&ihdr->daddr);
-    if (!tb) {
-        return XDP_PASS;
-    }
 
     if (tb->segment_length > MAX_SEGMENTS) {
         return XDP_DROP;
@@ -89,7 +73,7 @@ static inline int handle_ipv4(struct xdp_md *xdp) {
     if ((void *)(data + sizeof(struct ethhdr) + sizeof(struct ipv6hdr) + sizeof(struct ipv6_sr_hdr)) > data_end) {
         return XDP_DROP;
     }
-    srh->nexthdr = IPPROTO_IPIP;
+    srh->nexthdr = protocol;
     srh->hdrlen = (srh_len / 8 - 1);
     srh->type = 4;
     srh->segments_left = tb->segment_length - 1;
@@ -110,9 +94,44 @@ static inline int handle_ipv4(struct xdp_md *xdp) {
     return XDP_TX;
 }
 
-static inline int handle_ipv6(struct xdp_md *ctx) {
-    // TODO
-    return XDP_PASS;
+static inline int handle_ipv4(struct xdp_md *xdp) {
+    void *data_end = (void *)(long)xdp->data_end;
+    void *data = (void *)(long)xdp->data;
+    struct transit_behavior *tb;
+    struct iphdr *ihdr = (void *)(data + sizeof(struct ethhdr));
+    __u16 inner_len;
+
+    if ((void*)(data + sizeof(struct ethhdr) + sizeof(struct iphdr)) > data_end) {
+        return XDP_DROP;
+    }
+    inner_len = ntohs(ihdr->tot_len);
+
+    tb = transit_table_v4.lookup(&ihdr->daddr);
+    if (!tb) {
+        return XDP_PASS;
+    }
+
+    return srv6_encap(xdp, tb, inner_len, IPPROTO_IPIP);
+}
+
+static inline int handle_ipv6(struct xdp_md *xdp) {
+    void *data_end = (void *)(long)xdp->data_end;
+    void *data = (void *)(long)xdp->data;
+    struct transit_behavior *tb;
+    struct ipv6hdr *ihdr = (void *)(data + sizeof(struct ethhdr));
+    __u16 inner_len;
+
+    if ((void*)(data + sizeof(struct ethhdr) + sizeof(struct ipv6hdr)) > data_end) {
+        return XDP_DROP;
+    }
+    inner_len = sizeof(struct ipv6hdr) + ntohs(ihdr->payload_len);
+
+    tb = transit_table_v6.lookup(&ihdr->daddr);
+    if (!tb) {
+        return XDP_PASS;
+    }
+
+    return srv6_encap(xdp, tb, inner_len, IPPROTO_IPV6);
 }
 
 
