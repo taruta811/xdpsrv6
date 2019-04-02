@@ -67,6 +67,8 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
+        import os
+        print("Usage: {} interface".format(os.path.basename(__file__)))
         exit(1)
 
     xdp_srv6_t_encap(sys.argv[1])
