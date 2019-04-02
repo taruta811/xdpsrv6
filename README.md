@@ -5,3 +5,13 @@
 
 * Transit behaviors
   - T.Encaps
+
+## Test
+```
+python test/test_xxx.py
+```
+
+## Attach XDP program
+```
+python src/xdp_xxx.py eth1
+```
