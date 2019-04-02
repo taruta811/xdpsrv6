@@ -8,7 +8,7 @@
 
 ## Test
 ```
-python test/test_xxx.py
+python tests/test_xxx.py
 ```
 
 ## Attach XDP program
