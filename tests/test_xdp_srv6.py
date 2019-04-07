@@ -1,5 +1,6 @@
 import unittest
 
+from enum import IntEnum
 from bcc import BPF, libbcc
 import ctypes
 from scapy.all import raw, Ether, ARP, IP, IPv6, TCP, IPv6ExtHdrSegmentRouting
@@ -9,12 +10,41 @@ import socket
 MAX_SEGMENTS = 5
 
 
+class SRv6EndFunction(IntEnum):
+    END = 1
+    END_X = 2
+    END_T = 3
+    END_DX2 = 4
+    END_DX6 = 5
+    END_DX4 = 6
+    END_DT6 = 7
+    END_DT4 = 8
+    END_B6 = 9
+    END_B6_ENCAPS = 10
+    END_BM = 11
+    END_S = 12
+    END_AS = 13
+    END_AM = 14
+
+
 def ipv6_to_n(ipv6):
     addr = (ctypes.c_uint32 * 4)()
     addr_int = int(ipv6)
     for i in range(4):
         addr[-i - 1] = socket.htonl((addr_int >> (32 * i) & 0xffffffff))
     return addr
+
+
+class EndFunction(ctypes.Structure):
+    _fields_ = [
+        ("function", ctypes.c_uint8),
+    ]
+
+    @staticmethod
+    def create(function):
+        ef = EndFunction()
+        ef.function = function
+        return ef
 
 
 class TransitBehavior(ctypes.Structure):
@@ -43,7 +73,7 @@ class TransitBehavior(ctypes.Structure):
             self.segments[i] = ipv6_to_n(segment)
 
 
-class SRv6_T_Encaps_TestCase(unittest.TestCase):
+class SRv6TestCaseBase(unittest.TestCase):
     bpf = None
     func = None
     tb_table = None
@@ -73,6 +103,8 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
             # print("exp:  {}".format(raw(data_out_expect).encode("hex")))
             self.assertEqual(data_out[:size_out.value], raw(data_out_expect))
 
+
+class SRv6_T_Encaps_TestCase(SRv6TestCaseBase):
     def setUp(self):
         self.bpf = BPF(src_file=b"../src/xdp_srv6_t_encaps.c")
         self.func = self.bpf.load_func("xdp_srv6_t_encaps", BPF.XDP)
@@ -114,7 +146,7 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
         packet_in = Ether() / IP(src="192.168.0.1", dst="192.168.0.2") / TCP()
         self._run_test(packet_in, None, BPF.XDP_PASS)
 
-    def test_encap__ipv4_one_segment(self):
+    def test_encap_ipv4_one_segment(self):
         packet_in = \
             Ether(src="aa:aa:aa:aa:aa:aa", dst="bb:bb:bb:bb:bb:bb") / \
             IP(src="192.168.1.1", dst="192.168.1.2") / \
@@ -165,6 +197,44 @@ class SRv6_T_Encaps_TestCase(unittest.TestCase):
             IPv6(src="2001:db8::1", dst="2001:db8::3") / \
             TCP()
         self._run_test(packet_in, packet_out, BPF.XDP_TX)
+
+
+class SRv6_End_TestCase(SRv6TestCaseBase):
+    def setUp(self):
+        self.bpf = BPF(src_file=b"../src/xdp_srv6_end_functions.c")
+        self.func = self.bpf.load_func("xdp_srv6_handle_end_function", BPF.XDP)
+
+        self.end_function_table = self.bpf.get_table("end_function_table")
+
+        dst_ip_key = self.end_function_table.Key()
+        dst_ip_key.in6_u.u6_addr32 = ipv6_to_n(
+            ipaddress.IPv6Address(u"fc00::3"))
+        self.end_function_table[dst_ip_key] = EndFunction.create(
+            function=SRv6EndFunction.END)
+
+    def test_end_ipv4_valid(self):
+        packet_in = \
+            Ether(src="aa:aa:aa:aa:aa:aa", dst="bb:bb:bb:bb:bb:bb") / \
+            IPv6(src="fc00::1", dst="fc00::3") / \
+            IPv6ExtHdrSegmentRouting(len=(16 * 2) / 8, segleft=1, lastentry=1, addresses=["fc00::2", "fc00::3"]) / \
+            IP(src="192.168.1.1", dst="192.168.1.3") / \
+            TCP()
+        packet_out = \
+            Ether(src="bb:bb:bb:bb:bb:bb", dst="aa:aa:aa:aa:aa:aa") / \
+            IPv6(src="fc00::1", dst="fc00::2") / \
+            IPv6ExtHdrSegmentRouting(len=(16 * 2) / 8, segleft=0, lastentry=1, addresses=["fc00::2", "fc00::3"]) / \
+            IP(src="192.168.1.1", dst="192.168.1.3") / \
+            TCP()
+        self._run_test(packet_in, packet_out, BPF.XDP_TX)
+
+    def test_end_ipv4_segment_left_zero(self):
+        packet_in = \
+            Ether(src="aa:aa:aa:aa:aa:aa", dst="bb:bb:bb:bb:bb:bb") / \
+            IPv6(src="fc00::1", dst="fc00::3") / \
+            IPv6ExtHdrSegmentRouting(len=(16 * 2) / 8, segleft=0, lastentry=0, addresses=["fc00::3"]) / \
+            IP(src="192.168.1.1", dst="192.168.1.3") / \
+            TCP()
+        self._run_test(packet_in, None, BPF.XDP_DROP)
 
 
 if __name__ == "__main__":
