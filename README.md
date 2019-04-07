@@ -6,6 +6,9 @@
 * Transit behaviors
   - T.Encaps
 
+* End functions
+  - End
+
 ## Test
 ```
 python tests/test_xxx.py
